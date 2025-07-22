@@ -3,6 +3,7 @@
 This github contains the code for the FathomNet 2025 kaggle competition which achieved 5th place overall. 
 
 Competition Link: https://www.kaggle.com/competitions/fathomnet-2025
+
 Link to 5th place checkpoint: https://huggingface.co/FathomNet/FathomNet-2025-5thplace-Model/tree/main
 
 Things I think worked well:
