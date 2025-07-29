@@ -5,7 +5,7 @@ import torch
 
 
 # modified from https://github.com/Confusezius/Revisiting_Deep_Metric_Learning_PyTorch
-class BatchMiner():
+class TripletBatchMiner():
     def __init__(self):
         self.lower_cutoff = 0.5
         self.upper_cutoff = 1.4

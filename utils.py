@@ -1,3 +1,4 @@
+import json
 import torch
 import random
 import numpy as np
@@ -8,14 +9,17 @@ import torchvision.utils as vutils
 from ete3 import Tree
 from tqdm import tqdm
 
-import torch
-import torchvision.utils as vutils
 from torch.utils.data import DataLoader, random_split
 from torchvision import datasets, transforms, models
 
 from sampler import GroupedPrefixSampler
 from dataset import InferenceDataset
 
+
+
+def save_opts(opt, path):
+    with open(path, 'w') as f:
+        json.dump(opt, f, indent=4)
 
 def sample_triplets(embeddings: torch.Tensor, labels: torch.Tensor, dist_matrix: torch.tensor):
     """

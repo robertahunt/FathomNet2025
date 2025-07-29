@@ -1,4 +1,5 @@
 import os
+import json
 import itertools
 import numpy as np
 import pandas as pd
@@ -13,7 +14,7 @@ from torchvision import datasets, transforms, models
 
 import pytorch_lightning as pl
 
-from batchminer import BatchMiner
+from batchminer import TripletBatchMiner
 from utils import save_image_grid
 from utils import get_T_matrix, tree_to_distance_matrix, rand_bbox, sample_triplets
 from utils import run_inference, save_predictions
@@ -40,14 +41,16 @@ class GraphClassifier(torch.nn.Module):
         return x, self.classifier(x)#torch.hstack((x,x1)))
 
 class EfficientNetClassifier(pl.LightningModule):
-    def __init__(self, tree_path, labels, num_classes=10, lr=1e-3):
+    def __init__(self, tree_path, labels, opt, num_classes=10, lr=1e-3):
         super().__init__()
         self.save_hyperparameters()
+        self.opt = opt
         # Load EfficientNet B0
         self.model = models.efficientnet_b0(pretrained=True)
         # Replace classifier head
         self.model.classifier[1] = nn.Linear(self.model.classifier[1].in_features, num_classes)
-        self.model.graph_classifier = GraphClassifier()
+        if self.opt['Graph']:
+            self.model.graph_classifier = GraphClassifier()
         self.tree = Tree(tree_path, format=3)
         self.unique_labels = sorted(np.unique(labels))
         self.class_to_idx = {cl:idx for idx, cl in enumerate(self.unique_labels)}
@@ -56,8 +59,8 @@ class EfficientNetClassifier(pl.LightningModule):
         self.T = get_T_matrix(self.unique_labels, "", self.tree)
         self.sub_classes = self.get_sub_classes()
         self.ancestors = self.get_ancestors()
-        self.focus_classes = ['Munidopsis', 'Gastropoda', 'Acanthoptilum', 'Benthocodon pedunculata','Sebastes', 'Asteroidea', 'Actinopterygii', 'Metridium farcimen',
-       'Porifera', 'Scotoplanes globosa', 'Scleractinia','Gersemia juliepackardae', 'Elpidia', 'Keratoisis', 'Caridea']
+        #self.focus_classes = ['Munidopsis', 'Gastropoda', 'Acanthoptilum', 'Benthocodon pedunculata','Sebastes', 'Asteroidea', 'Actinopterygii', 'Metridium farcimen',
+        #'Porifera', 'Scotoplanes globosa', 'Scleractinia','Gersemia juliepackardae', 'Elpidia', 'Keratoisis', 'Caridea']
         self.focus_classes = []#[self.class_to_idx[x] for x in self.focus_classes]
 
         self.class_weights = []
@@ -69,19 +72,30 @@ class EfficientNetClassifier(pl.LightningModule):
         self.class_weights = torch.tensor(self.class_weights).float().cuda()
 
         self.best_val_acc = 0
-        self.triplet_batch_miner = BatchMiner()
+        self.best_val_loss = np.inf
+        self.best_val_EM_loss = np.inf
+        self.best_val_MP_loss = np.inf
+
+        if self.opt['Triplet'] > 0:
+            self.batch_miner = TripletBatchMiner()
+        else:
+            self.batch_miner = None
+
+
 
     def forward(self, x, image_ids, img_sizes):
         x = self.model.avgpool(self.model.features(x))
-        x = self.model.classifier[0](x) # dropout
-        
-        val_to_indices = {_id.item(): torch.where(image_ids == _id)[0].cpu().numpy().tolist() for _id in image_ids}
-        edge_indices = []
-        for k in val_to_indices.keys():
-            edges = list(itertools.product(val_to_indices[k],val_to_indices[k]))
-            edge_indices += edges
-        return self.model.graph_classifier(x.squeeze().cuda(), torch.tensor(edge_indices).T.cuda(), torch.tensor(img_sizes).cuda())
-        #return x, self.model.classifier(x.cuda())
+
+        if self.opt['Graph']:
+            x = self.model.classifier[0](x) # dropout
+            val_to_indices = {_id.item(): torch.where(image_ids == _id)[0].cpu().numpy().tolist() for _id in image_ids}
+            edge_indices = []
+            for k in val_to_indices.keys():
+                edges = list(itertools.product(val_to_indices[k],val_to_indices[k]))
+                edge_indices += edges
+            return self.model.graph_classifier(x.squeeze().cuda(), torch.tensor(edge_indices).T.cuda(), torch.tensor(img_sizes).cuda())
+        else:
+            return x, self.model.classifier(x.squeeze().cuda())
 
     def get_sub_classes(self):
         # get all sub classes of a certain class (including the class itself)
@@ -133,14 +147,23 @@ class EfficientNetClassifier(pl.LightningModule):
     def on_validation_epoch_end(self):
         predictions, probs = run_inference(self, image_dir= 'data_test/rois', class_names=self.unique_labels)
         df = pd.DataFrame(predictions)
-        df.sort_values('annotation_id').to_csv(os.path.join(self.logger.log_dir, f'{self.current_epoch}_submission_data.csv'))
+        df.sort_values('annotation_id').to_csv(os.path.join(self.logger.log_dir, f'epoch{self.current_epoch}_submission_data.csv'))
         df[['annotation_id','concept_name']].sort_values('annotation_id').to_csv(os.path.join(self.logger.log_dir, f'{self.current_epoch}_submission.csv'), index=False)
         save_predictions(self.val_logits, self.val_y, self.val_paths, self.unique_labels, self.dist_matrix, os.path.join(self.logger.log_dir,f'val_predictions_epoch_{self.current_epoch}.csv'))
 
         val_acc  = self.trainer.callback_metrics.get("val_acc")
+        val_loss  = self.trainer.callback_metrics.get("val_loss")
+        val_EM_tree_loss  = self.trainer.callback_metrics.get("val_EM_tree_loss")
+        val_MP_tree_loss  = self.trainer.callback_metrics.get("val_MP_tree_loss")
         if val_acc > self.best_val_acc:
-            df[['annotation_id','concept_name']].sort_values('annotation_id').to_csv(os.path.join(self.logger.log_dir, f'best_{self.current_epoch}_submission.csv'), index=False)
-            probs.sort_index().to_csv(os.path.join(self.logger.log_dir, f'best_{self.current_epoch}_probabilities.csv'), index=True)
+            df[['annotation_id','concept_name']].sort_values('annotation_id').to_csv(os.path.join(self.logger.log_dir, f'0_best_val_acc_submission.csv'), index=False)
+            probs.sort_index().to_csv(os.path.join(self.logger.log_dir, f'best_acc_epoch{self.current_epoch}_probabilities.csv'), index=True)
+        if val_loss > self.best_val_loss:
+            df[['annotation_id','concept_name']].sort_values('annotation_id').to_csv(os.path.join(self.logger.log_dir, f'0_best_val_loss_submission.csv'), index=False)
+        if val_EM_tree_loss > self.best_val_EM_loss:
+            df[['annotation_id','concept_name']].sort_values('annotation_id').to_csv(os.path.join(self.logger.log_dir, f'0_best_val_EM_submission.csv'), index=False)
+        if val_MP_tree_loss > self.best_val_MP_loss:
+            df[['annotation_id','concept_name']].sort_values('annotation_id').to_csv(os.path.join(self.logger.log_dir, f'0_best_val_MP_submission.csv'), index=False)
 
 
     
@@ -151,8 +174,13 @@ class EfficientNetClassifier(pl.LightningModule):
         if (batch_idx == 0):
             save_image_grid(x, os.path.join(self.logger.log_dir,'example_inputs.png'))
         # Choose augmentation type randomly: 0 = mixup, 1 = cutmix, 2 = none
-        aug_type = np.random.choice([0, 1, 2], p=[0.1,0.1,0.8])
+        
+        if self.opt['DataAug']:
+            aug_type = np.random.choice([0, 1, 2])
+        else:
+            aug_type = 2
 
+    
         if aug_type == 0:  # Mixup
             lam = np.random.beta(0.4, 0.4)
             index = torch.randperm(x.size(0))
@@ -191,12 +219,8 @@ class EfficientNetClassifier(pl.LightningModule):
                     triplet_loss += F.triplet_margin_loss(anc, p, n, w)
 
             acc = (logits.argmax(dim=1) == y).float().mean()
-
-        #anchors, pos, neg, weights = sample_triplets(emb, y, self.dist_matrix)
         
 
-
-        #cov_loss = self.cov_loss(emb, y)
         self.log("train_loss", loss, on_step=False, on_epoch=True)
         self.log("train_acc", acc, on_step=False, on_epoch=True)
         self.log("train_EM_tree_loss", EM_tree_loss, on_step=False, on_epoch=True)
@@ -204,9 +228,8 @@ class EfficientNetClassifier(pl.LightningModule):
         self.log("train_tree_loss", tree_loss, on_step=False, on_epoch=True)
         self.log("train_LPL_loss", LPL_loss, on_step=False, on_epoch=True)
         self.log("train_triplet_loss", triplet_loss, on_step=False, on_epoch=True)
-        #self.log("train_cov_loss", cov_loss, on_step=False, on_epoch=True)
-        return loss + LPL_loss + 0.01*triplet_loss
-
+        return loss + self.opt['Triplet']*triplet_loss + self.opt['LPL']*LPL_loss
+    
     def validation_step(self, batch, batch_idx):
         x, y, image_id, paths, img_sizes = batch['x'], batch['y'], batch['image_id'], batch['path'], batch['img_size']
 
@@ -228,14 +251,12 @@ class EfficientNetClassifier(pl.LightningModule):
         MP_tree_loss = self.MP_tree_loss(logits, y)
         tree_loss = self.tree_loss_function(logits, y)
         LPL_loss = self.LPL_loss(logits, y)
-        #anchors, pos, neg, weights = sample_triplets(emb, y, self.dist_matrix)
 
         triplet_loss = torch.tensor(0).float().cuda()
         if len(y.unique()) > 1:
             anchors, pos, neg, weights = sample_triplets(emb, y, self.dist_matrix)#self.triplet_batch_miner(emb, y, self.dist_matrix)
             for anc, p, n, w in zip(anchors, pos, neg, weights):
                 triplet_loss += F.triplet_margin_loss(anc, p, n, w)
-        #cov_loss = self.cov_loss(emb, y)
         self.log("val_loss", loss, on_step=False, on_epoch=True)
         self.log("val_acc", acc, on_step=False, on_epoch=True)
         self.log("val_EM_tree_loss", EM_tree_loss, on_step=False, on_epoch=True)
@@ -243,9 +264,6 @@ class EfficientNetClassifier(pl.LightningModule):
         self.log("val_tree_loss", tree_loss, on_step=False, on_epoch=True)
         self.log("val_LPL_loss", LPL_loss, on_step=False, on_epoch=True)
         self.log("val_triplet_loss", triplet_loss, on_step=False, on_epoch=True)
-        #self.log("val_cov_loss", cov_loss, on_step=False, on_epoch=True)
-
-
 
 
     def LPL_loss(self, logits, y):

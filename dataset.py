@@ -20,8 +20,9 @@ from sampler import GroupedPrefixSampler
 
 
 class ImageFolderDataModule(pl.LightningDataModule):
-    def __init__(self, data_dir, batch_size=64, num_workers=4, img_size=224):
+    def __init__(self, data_dir, opt, batch_size=64, num_workers=4, img_size=224):
         super().__init__()
+        self.opt = opt
         self.data_dir = data_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -56,10 +57,12 @@ class ImageFolderDataModule(pl.LightningDataModule):
         self.class_names = self.train_set.classes
 
     def setup_samplers(self, stage=None):
-        self.train_sampler = GroupedPrefixSampler(self.train_set)
-        self.val_sampler = GroupedPrefixSampler(self.val_set, shuffle=False)
-        #self.train_sampler = RandomSampler(self.train_set)
-        #self.val_sampler = RandomSampler(self.val_set)
+        if self.opt['Graph']:
+            self.train_sampler = GroupedPrefixSampler(self.train_set)
+            self.val_sampler = GroupedPrefixSampler(self.val_set, shuffle=False)
+        else:
+            self.train_sampler = RandomSampler(self.train_set)
+            self.val_sampler = RandomSampler(self.val_set)
 
     def train_dataloader(self):
         return DataLoader(self.train_set, batch_size=self.batch_size, num_workers=self.num_workers, sampler=self.train_sampler)
