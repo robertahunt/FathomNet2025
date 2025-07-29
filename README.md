@@ -2,6 +2,8 @@
 
 This github contains the code for the FathomNet 2025 kaggle competition which achieved 5th place overall. 
 
+Link to kaggle discussion topic with more details on implementation: https://www.kaggle.com/competitions/fathomnet-2025/discussion/591615 
+
 Competition Link: https://www.kaggle.com/competitions/fathomnet-2025
 
 Link to 5th place checkpoint: https://huggingface.co/FathomNet/FathomNet-2025-5thplace-Model/tree/main
